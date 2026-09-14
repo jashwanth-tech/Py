@@ -1,0 +1,66 @@
+name: Render Manim
+
+on:
+  workflow_dispatch:
+    inputs:
+      python_file:
+        description: "Python file"
+        required: true
+        default: "magnetic_field_no_work.py"
+
+      scene:
+        description: "Scene class"
+        required: true
+        default: "MagneticFieldNoWork"
+
+      quality:
+        description: "Quality"
+        required: true
+        type: choice
+        options:
+          - l
+          - m
+          - h
+        default: h
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ffmpeg \
+            libcairo2-dev \
+            libpango1.0-dev \
+            pkg-config \
+            texlive-latex-base \
+            texlive-latex-extra \
+            texlive-fonts-recommended \
+            dvisvgm
+
+      - name: Install Manim
+        run: |
+          pip install manim==0.19.1
+
+      - name: Render
+        run: |
+          manim -q${{ inputs.quality }} \
+            "${{ inputs.python_file }}" \
+            "${{ inputs.scene }}"
+
+      - name: Upload video
+        uses: actions/upload-artifact@v4
+        with:
+          name: rendered-video
+          path: media/videos/
