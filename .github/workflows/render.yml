@@ -1,14 +1,34 @@
-name: Render Universe Expansion
+name: Render Manim
 
 on:
   workflow_dispatch:
+    inputs:
+      python_file:
+        description: "Python file"
+        required: true
+        default: "magnetic_field_no_work.py"
+
+      scene:
+        description: "Scene class"
+        required: true
+        default: "MagneticFieldNoWork"
+
+      quality:
+        description: "Quality"
+        required: true
+        type: choice
+        options:
+          - l
+          - m
+          - h
+        default: h
 
 jobs:
   render:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Get repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -33,12 +53,14 @@ jobs:
         run: |
           pip install manim==0.19.1
 
-      - name: Render Universe Expansion
+      - name: Render
         run: |
-          manim -qh universe_expansion_faster_than_light.py UniverseExpansion
+          manim -q${{ inputs.quality }} \
+            "${{ inputs.python_file }}" \
+            "${{ inputs.scene }}"
 
       - name: Upload video
         uses: actions/upload-artifact@v4
         with:
-          name: universe-expansion-video
+          name: rendered-video
           path: media/videos/
