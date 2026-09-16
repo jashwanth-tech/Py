@@ -42,8 +42,9 @@ class SpinningTopPhysics(Scene):
         # ---------------------------------------------------------------------
         # Precompute Instability Trajectory via NumPy
         # ---------------------------------------------------------------------
-        dt = 0.016
-        t_fall = np.arange(0, 7.5, dt)
+        fall_duration = 5.6
+        dt_sim = 0.016
+        t_fall = np.arange(0, fall_duration + 0.1, dt_sim)
         n_fall_steps = len(t_fall)
 
         fall_theta = np.zeros(n_fall_steps)
@@ -66,7 +67,7 @@ class SpinningTopPhysics(Scene):
                 runaway = 0.085 * (elapsed ** 2.3)
                 th_val = min(78.0 * np.pi / 180.0, 24.0 * np.pi / 180.0 + runaway + wobble)
 
-            ph += pr * dt
+            ph += pr * dt_sim
             fall_theta[i] = th_val
             fall_phi[i] = ph
             fall_spin[i] = sp
@@ -89,10 +90,10 @@ class SpinningTopPhysics(Scene):
         show_trace = ValueTracker(0.0)
         L_scale_tracker = ValueTracker(1.0)
 
-        # Add trackers to scene to enable Mobject updaters
+        # Add state mobjects to the scene
         self.add(spin_phase_tracker, phi_tracker, cam_theta_tracker)
 
-        # Pre-instantiate MathTex label templates
+        # Pre-instantiate MathTex label templates to prevent font missing errors
         r_lbl_template = MathTex(r"\mathbf{r}", font_size=26, color="#10B981")
         fg_lbl_template = MathTex(r"\mathbf{F}_g", font_size=26, color="#F43F5E")
         tau_lbl_template = MathTex(r"\boldsymbol{\tau}", font_size=32, color="#F59E0B")
@@ -134,7 +135,7 @@ class SpinningTopPhysics(Scene):
 
             mobs = VGroup()
 
-            # 1. Ground Grid
+            # Ground grid
             ground_group = VGroup()
             for r in [1.2, 2.4, 3.6]:
                 ring_pts = [
@@ -161,7 +162,7 @@ class SpinningTopPhysics(Scene):
             ground_group.add(pivot_pad)
             mobs.add(ground_group)
 
-            # 2. Lower shaft
+            # Lower shaft
             p_rot_2d = project_3d(p_rotor, c_ph, c_th)
             p_tip_2d = project_3d(p_tip, c_ph, c_th)
 
@@ -172,7 +173,7 @@ class SpinningTopPhysics(Scene):
             )
             mobs.add(lower_shaft)
 
-            # 3. Rotor Disc
+            # Rotor Disc
             n_seg = 36
             angles = np.linspace(0, 2 * np.pi, n_seg, endpoint=False)
             disc_rim_3d = [
@@ -190,7 +191,7 @@ class SpinningTopPhysics(Scene):
             )
             mobs.add(rotor_body)
 
-            # 4. Spokes
+            # Spokes
             for k in range(4):
                 psi = sp + k * (np.pi / 2.0)
                 spoke_rim_3d = p_rotor + r_rotor * (np.cos(psi) * u_hat + np.sin(psi) * v_hat)
@@ -206,7 +207,7 @@ class SpinningTopPhysics(Scene):
             hub = Dot(p_rot_2d, radius=0.09, color="#E2E8F0")
             mobs.add(hub)
 
-            # 5. Upper shaft
+            # Upper shaft
             upper_shaft = Line(
                 p_rot_2d, p_tip_2d,
                 stroke_color="#CBD5E1",
@@ -217,7 +218,7 @@ class SpinningTopPhysics(Scene):
             tip_cap = Dot(p_tip_2d, radius=0.06, color="#FFFFFF")
             mobs.add(tip_cap)
 
-            # 6. Educational Vectors
+            # Educational Vectors
             p_cm_2d = project_3d(p_cm, c_ph, c_th)
 
             cm_dot = Dot(p_cm_2d, radius=0.085, color="#F59E0B")
@@ -308,7 +309,7 @@ class SpinningTopPhysics(Scene):
                     dL_lbl.next_to(dL_arrow.get_end(), RIGHT, buff=0.1)
                     mobs.add(dL_arrow, dL_lbl)
 
-            # Trace
+            # Precession circular trace
             w_trace = show_trace.get_value()
             if w_trace > 0.01:
                 z_tip_trace = p_cm[2] + l_mag * np.cos(th)
@@ -326,11 +327,11 @@ class SpinningTopPhysics(Scene):
         top_mesh = always_redraw(create_top_mobject)
         self.add(top_mesh)
 
-        # Continuous spin updater attached directly to the ValueTracker mobject
-        def spin_updater_func(tracker, dt_step):
-            tracker.increment_value(32.0 * dt_step)
+        # Uses exact parameter name 'dt' with default dt=0 to ensure compatibility with Manim CE
+        def spin_updater_func(mob, dt=0):
+            mob.increment_value(32.0 * dt)
 
-        spin_phase_tracker.add_updater(spin_updater_func)
+        spin_phase_tracker.add_updater(spin_updater_func, call_updater=False)
 
         # ---------------------------------------------------------------------
         # Scene 1: Hook (0.0s – 6.0s)
@@ -430,14 +431,13 @@ class SpinningTopPhysics(Scene):
             run_time=0.8,
         )
 
-        # Steady precession rotation with camera orbit
-        def precession_updater(tracker, dt_step):
-            tracker.increment_value(1.55 * dt_step)
-            cam_theta_tracker.increment_value(0.08 * dt_step)
-
-        phi_tracker.add_updater(precession_updater)
-        self.wait(8.0)
-        phi_tracker.remove_updater(precession_updater)
+        # Native linear precession animation (eliminates extra updater logic)
+        self.play(
+            phi_tracker.animate.increment_value(1.55 * 8.0),
+            cam_theta_tracker.animate.increment_value(0.08 * 8.0),
+            run_time=8.0,
+            rate_func=linear,
+        )
 
         self.play(
             FadeOut(prec_badge),
@@ -462,27 +462,31 @@ class SpinningTopPhysics(Scene):
             run_time=0.8,
         )
 
-        # Switch to numerical playback
+        # Stop regular spin updater
         spin_phase_tracker.remove_updater(spin_updater_func)
 
-        fall_duration = 5.6
-        step_dt = fall_duration / n_fall_steps
+        # Smooth continuous interpolation of fall physics
+        fall_clock = ValueTracker(0.0)
+        self.add(fall_clock)
 
-        for idx in range(0, n_fall_steps, 2):
-            th_val = fall_theta[idx]
-            ph_val = fall_phi[idx]
-            sp_val = fall_spin[idx]
+        def fall_playback_updater(mob, dt=0):
+            mob.increment_value(dt)
+            t_cur = mob.get_value()
+            if t_cur <= fall_duration:
+                th_val = float(np.interp(t_cur, t_fall, fall_theta))
+                ph_val = float(np.interp(t_cur, t_fall, fall_phi))
+                sp_val = float(np.interp(t_cur, t_fall, fall_spin))
 
-            theta_tracker.set_value(th_val)
-            phi_tracker.set_value(ph_val)
-            spin_phase_tracker.increment_value(sp_val * step_dt * 2)
+                theta_tracker.set_value(th_val)
+                phi_tracker.set_value(ph_val)
+                spin_phase_tracker.increment_value(sp_val * dt)
+                norm_spin = max(0.1, sp_val / 35.0)
+                L_scale_tracker.set_value(norm_spin)
 
-            norm_spin = max(0.1, sp_val / 35.0)
-            L_scale_tracker.set_value(norm_spin)
-
-            self.wait(step_dt * 2)
-
-        self.wait(0.5)
+        fall_clock.add_updater(fall_playback_updater, call_updater=False)
+        self.wait(fall_duration)
+        fall_clock.remove_updater(fall_playback_updater)
+        self.wait(0.4)
 
         # ---------------------------------------------------------------------
         # Final Frame: Core Physics Insight (37.0s – 45.5s)
