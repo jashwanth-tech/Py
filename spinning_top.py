@@ -16,10 +16,6 @@ config.background_color = "#0B0F17"
 # 3D Vector & Projection Utilities (Perspective Projection)
 # -----------------------------------------------------------------------------
 def project_3d(point_3d, cam_phi, cam_theta, cam_dist=13.0, scale=1.35, center=(0, -2.2, 0)):
-    """
-    Projects 3D coordinates into 2D camera coordinates with perspective foreshortening.
-    Completely self-contained; runs stably on headless CI runners without OpenGL/GPU dependencies.
-    """
     x, y, z = point_3d
     # Azimuth rotation around vertical z-axis
     x1 = x * np.cos(cam_theta) + y * np.sin(cam_theta)
@@ -59,7 +55,6 @@ class SpinningTopPhysics(Scene):
         base_prec_rate = 1.75
 
         for i, t in enumerate(t_fall):
-            # Angular velocity decreases due to friction
             sp = 35.0 * np.exp(-0.38 * t)
             if t < 1.0:
                 th_val = 24.0 * np.pi / 180.0
@@ -79,13 +74,13 @@ class SpinningTopPhysics(Scene):
         # ---------------------------------------------------------------------
         # State Trackers
         # ---------------------------------------------------------------------
-        theta_tracker = ValueTracker(24.0 * np.pi / 180.0)  # Tilt angle (rad)
-        phi_tracker = ValueTracker(0.0)                    # Precession angle (rad)
-        spin_phase_tracker = ValueTracker(0.0)             # Rotor spin angle (rad)
+        theta_tracker = ValueTracker(24.0 * np.pi / 180.0)
+        phi_tracker = ValueTracker(0.0)
+        spin_phase_tracker = ValueTracker(0.0)
         cam_theta_tracker = ValueTracker(-58.0 * np.pi / 180.0)
         cam_phi_tracker = ValueTracker(66.0 * np.pi / 180.0)
 
-        # Visibility flags for educational vectors
+        # Visibility flags
         show_gravity = ValueTracker(0.0)
         show_r_vec = ValueTracker(0.0)
         show_torque = ValueTracker(0.0)
@@ -94,10 +89,10 @@ class SpinningTopPhysics(Scene):
         show_trace = ValueTracker(0.0)
         L_scale_tracker = ValueTracker(1.0)
 
-        # ---------------------------------------------------------------------
-        # Pre-instantiate MathTex label templates to prevent font missing glyphs
-        # and avoid per-frame LaTeX compilation overhead
-        # ---------------------------------------------------------------------
+        # Add trackers to scene to enable Mobject updaters
+        self.add(spin_phase_tracker, phi_tracker, cam_theta_tracker)
+
+        # Pre-instantiate MathTex label templates
         r_lbl_template = MathTex(r"\mathbf{r}", font_size=26, color="#10B981")
         fg_lbl_template = MathTex(r"\mathbf{F}_g", font_size=26, color="#F43F5E")
         tau_lbl_template = MathTex(r"\boldsymbol{\tau}", font_size=32, color="#F59E0B")
@@ -114,13 +109,11 @@ class SpinningTopPhysics(Scene):
             c_th = cam_theta_tracker.get_value()
             c_ph = cam_phi_tracker.get_value()
 
-            # Symmetry axis unit vector n_hat
             nx = np.sin(th) * np.cos(ph)
             ny = np.sin(th) * np.sin(ph)
             nz = np.cos(th)
             n_hat = np.array([nx, ny, nz])
 
-            # Orthonormal basis for rotor disc (perpendicular to n_hat)
             ref = np.array([0.0, 0.0, 1.0])
             if np.abs(np.dot(n_hat, ref)) > 0.92:
                 ref = np.array([1.0, 0.0, 0.0])
@@ -129,7 +122,6 @@ class SpinningTopPhysics(Scene):
             v_hat = np.cross(n_hat, u_hat)
             v_hat /= np.linalg.norm(v_hat)
 
-            # Key spatial markers (in 3D physics units)
             p_pivot = np.array([0.0, 0.0, 0.0])
             l_cm = 1.95
             l_rotor = 1.80
@@ -142,7 +134,7 @@ class SpinningTopPhysics(Scene):
 
             mobs = VGroup()
 
-            # 1. Ground coordinate grid
+            # 1. Ground Grid
             ground_group = VGroup()
             for r in [1.2, 2.4, 3.6]:
                 ring_pts = [
@@ -164,13 +156,12 @@ class SpinningTopPhysics(Scene):
                 )
                 ground_group.add(line)
 
-            # Ground pivot seat
             p_seat_2d = project_3d(p_pivot, c_ph, c_th)
             pivot_pad = Dot(p_seat_2d, radius=0.08, color="#64748B")
             ground_group.add(pivot_pad)
             mobs.add(ground_group)
 
-            # 2. Lower shaft (Pivot to rotor)
+            # 2. Lower shaft
             p_rot_2d = project_3d(p_rotor, c_ph, c_th)
             p_tip_2d = project_3d(p_tip, c_ph, c_th)
 
@@ -181,7 +172,7 @@ class SpinningTopPhysics(Scene):
             )
             mobs.add(lower_shaft)
 
-            # 3. Rotor Disc (Perimeter + Body)
+            # 3. Rotor Disc
             n_seg = 36
             angles = np.linspace(0, 2 * np.pi, n_seg, endpoint=False)
             disc_rim_3d = [
@@ -199,7 +190,7 @@ class SpinningTopPhysics(Scene):
             )
             mobs.add(rotor_body)
 
-            # 4. Spinning Spokes (Provides continuous visual feedback of rotation)
+            # 4. Spokes
             for k in range(4):
                 psi = sp + k * (np.pi / 2.0)
                 spoke_rim_3d = p_rotor + r_rotor * (np.cos(psi) * u_hat + np.sin(psi) * v_hat)
@@ -226,17 +217,14 @@ class SpinningTopPhysics(Scene):
             tip_cap = Dot(p_tip_2d, radius=0.06, color="#FFFFFF")
             mobs.add(tip_cap)
 
-            # -----------------------------------------------------------------
-            # Educational Vectors & Dynamics Visuals
-            # -----------------------------------------------------------------
+            # 6. Educational Vectors
             p_cm_2d = project_3d(p_cm, c_ph, c_th)
 
-            # Center of mass (CM) marker
             cm_dot = Dot(p_cm_2d, radius=0.085, color="#F59E0B")
             cm_glow = Dot(p_cm_2d, radius=0.15, color="#F59E0B", fill_opacity=0.3)
             mobs.add(cm_glow, cm_dot)
 
-            # Position vector r (Pivot -> CM)
+            # r vector
             w_r = show_r_vec.get_value()
             if w_r > 0.01:
                 r_arrow = Arrow(
@@ -250,7 +238,7 @@ class SpinningTopPhysics(Scene):
                 r_lbl.next_to(r_arrow.get_center(), LEFT, buff=0.15)
                 mobs.add(r_arrow, r_lbl)
 
-            # Gravity vector F_g (CM straight down)
+            # Gravity F_g
             w_g = show_gravity.get_value()
             if w_g > 0.01:
                 p_fg_3d = p_cm + np.array([0.0, 0.0, -1.65])
@@ -266,7 +254,7 @@ class SpinningTopPhysics(Scene):
                 fg_lbl.next_to(fg_arrow.get_end(), DOWN, buff=0.12)
                 mobs.add(fg_arrow, fg_lbl)
 
-            # Torque vector tau = r x F_g (strictly horizontal)
+            # Torque tau
             w_tau = show_torque.get_value()
             tau_dir = np.array([-np.sin(ph), np.cos(ph), 0.0])
             tau_len = 1.9
@@ -285,7 +273,7 @@ class SpinningTopPhysics(Scene):
                 tau_lbl.next_to(tau_arrow.get_end(), RIGHT, buff=0.12)
                 mobs.add(tau_arrow, tau_lbl)
 
-            # Angular Momentum Vector L (along symmetry axis)
+            # L vector
             w_L = show_L_vec.get_value()
             l_mag = 3.6 * L_scale_tracker.get_value()
             p_L_3d = p_cm + l_mag * n_hat
@@ -304,7 +292,7 @@ class SpinningTopPhysics(Scene):
                 L_lbl.next_to(p_L_2d, UP + RIGHT, buff=0.12)
                 mobs.add(L_arrow, L_lbl)
 
-                # Incremental change dL = tau * dt (tangent to precession cone)
+                # dL vector
                 w_dL = show_dL_vec.get_value()
                 if w_dL > 0.01:
                     p_dL_3d = p_L_3d + 1.25 * tau_dir
@@ -320,7 +308,7 @@ class SpinningTopPhysics(Scene):
                     dL_lbl.next_to(dL_arrow.get_end(), RIGHT, buff=0.1)
                     mobs.add(dL_arrow, dL_lbl)
 
-            # Precession Circular Trajectory
+            # Trace
             w_trace = show_trace.get_value()
             if w_trace > 0.01:
                 z_tip_trace = p_cm[2] + l_mag * np.cos(th)
@@ -335,15 +323,14 @@ class SpinningTopPhysics(Scene):
 
             return mobs
 
-        # Mount the dynamic top
         top_mesh = always_redraw(create_top_mobject)
         self.add(top_mesh)
 
-        # Persistent spin updater across Scenes 1-4 ensuring rotation never freezes
-        def continuous_spin_updater(dt_step):
-            spin_phase_tracker.increment_value(32.0 * dt_step)
+        # Continuous spin updater attached directly to the ValueTracker mobject
+        def spin_updater_func(tracker, dt_step):
+            tracker.increment_value(32.0 * dt_step)
 
-        self.add_updater(continuous_spin_updater)
+        spin_phase_tracker.add_updater(spin_updater_func)
 
         # ---------------------------------------------------------------------
         # Scene 1: Hook (0.0s – 6.0s)
@@ -373,16 +360,12 @@ class SpinningTopPhysics(Scene):
         tau_insight.next_to(tau_formula, DOWN, buff=0.3)
 
         self.play(FadeIn(sec2_header, shift=DOWN * 0.2), run_time=0.6)
-
-        # Reveal position vector r and downward gravitational force F_g
         self.play(
             show_r_vec.animate.set_value(1.0),
             show_gravity.animate.set_value(1.0),
             run_time=1.2,
         )
         self.play(FadeIn(tau_formula, shift=UP * 0.2), run_time=0.8)
-
-        # Reveal Torque vector tau
         self.play(
             show_torque.animate.set_value(1.0),
             FadeIn(tau_insight),
@@ -410,15 +393,8 @@ class SpinningTopPhysics(Scene):
             FadeIn(sec3_header),
             run_time=0.6,
         )
-
-        # Introduce angular momentum vector L along symmetry axis
-        self.play(
-            show_L_vec.animate.set_value(1.0),
-            run_time=1.0,
-        )
+        self.play(show_L_vec.animate.set_value(1.0), run_time=1.0)
         self.play(FadeIn(law_formula, scale=1.05), run_time=0.8)
-
-        # Show dL = tau * dt at tip of L
         self.play(
             show_dL_vec.animate.set_value(1.0),
             FadeIn(key_insight),
@@ -455,13 +431,13 @@ class SpinningTopPhysics(Scene):
         )
 
         # Steady precession rotation with camera orbit
-        def steady_precession_updater(mob, dt_step):
-            phi_tracker.increment_value(1.55 * dt_step)
+        def precession_updater(tracker, dt_step):
+            tracker.increment_value(1.55 * dt_step)
             cam_theta_tracker.increment_value(0.08 * dt_step)
 
-        top_mesh.add_updater(steady_precession_updater)
+        phi_tracker.add_updater(precession_updater)
         self.wait(8.0)
-        top_mesh.remove_updater(steady_precession_updater)
+        phi_tracker.remove_updater(precession_updater)
 
         self.play(
             FadeOut(prec_badge),
@@ -486,8 +462,8 @@ class SpinningTopPhysics(Scene):
             run_time=0.8,
         )
 
-        # Switch to direct numerical playback for the topple sequence
-        self.remove_updater(continuous_spin_updater)
+        # Switch to numerical playback
+        spin_phase_tracker.remove_updater(spin_updater_func)
 
         fall_duration = 5.6
         step_dt = fall_duration / n_fall_steps
@@ -499,10 +475,8 @@ class SpinningTopPhysics(Scene):
 
             theta_tracker.set_value(th_val)
             phi_tracker.set_value(ph_val)
-            # Dimensionally consistent spin increment matching elapsed time: rate * (step_dt * 2)
             spin_phase_tracker.increment_value(sp_val * step_dt * 2)
 
-            # L shrinks as spin decays
             norm_spin = max(0.1, sp_val / 35.0)
             L_scale_tracker.set_value(norm_spin)
 
