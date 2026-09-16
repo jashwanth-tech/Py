@@ -19,7 +19,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
 
       - name: Install system dependencies & LaTeX
         run: |
@@ -49,4 +48,4 @@ jobs:
         with:
           name: spinning-top-vertical-video
           path: media/videos/spinning_top/*/*.mp4
-          if-no-files-found: error 
+          if-no-files-found: error
