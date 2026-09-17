@@ -38,13 +38,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install manim
 
+      - name: Verify File Exists
+        run: ls -la scene.py
+
       - name: Render Video
         run: |
-          manim -v WARNING geodesic_orbit.py GeodesicOrbitMaster
+          manim -v WARNING scene.py GeodesicOrbitMaster
 
       - name: Upload Rendered MP4
         uses: actions/upload-artifact@v4
         with:
           name: earth-geodesic-orbit-vertical
-          path: media/videos/geodesic_orbit/*/*.mp4
+          path: media/videos/scene/*/*.mp4
           if-no-files-found: error
