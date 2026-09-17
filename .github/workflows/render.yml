@@ -1,16 +1,17 @@
 name: Render Manim Animation
 
 on:
-  workflow_dispatch:
   push:
-    paths:
-      - 'spinning_top.py'
-      - '.github/workflows/render.yml'
+    branches: [ main, master ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   render:
     runs-on: ubuntu-latest
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -18,34 +19,33 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+          cache: "pip"
 
-      - name: Install system dependencies & LaTeX
+      - name: Install System Dependencies & TeXLive
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ffmpeg \
-            libcairo2-dev \
             libpango1.0-dev \
             pkg-config \
             dvisvgm \
             texlive-latex-base \
             texlive-latex-extra \
-            texlive-fonts-extra \
-            texlive-science
+            texlive-fonts-recommended
 
-      - name: Install Python dependencies
+      - name: Install Manim CE
         run: |
           python -m pip install --upgrade pip
-          pip install manim numpy
+          pip install manim
 
-      - name: Render scene
+      - name: Render Video
         run: |
-          manim spinning_top.py SpinningTopPhysics
+          manim -v WARNING geodesic_orbit.py GeodesicOrbitMaster
 
-      - name: Upload rendered video
+      - name: Upload Rendered MP4
         uses: actions/upload-artifact@v4
         with:
-          name: spinning-top-vertical-video
-          path: media/videos/spinning_top/*/*.mp4
+          name: earth-geodesic-orbit-vertical
+          path: media/videos/geodesic_orbit/*/*.mp4
           if-no-files-found: error
