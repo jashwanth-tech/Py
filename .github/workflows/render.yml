@@ -38,16 +38,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install manim
 
-      - name: Verify File Exists
-        run: ls -la scene.py
+      - name: Verify Script Exists
+        run: ls -la barycenter.py
 
       - name: Render Video
         run: |
-          manim -v WARNING scene.py GeodesicOrbitMaster
+          manim -v WARNING barycenter.py SunBarycenterReel
 
       - name: Upload Rendered MP4
         uses: actions/upload-artifact@v4
         with:
-          name: earth-geodesic-orbit-vertical
-          path: media/videos/scene/*/*.mp4
+          name: sun-barycenter-vertical
+          path: media/videos/barycenter/*/*.mp4
           if-no-files-found: error
