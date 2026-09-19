@@ -1,53 +1,55 @@
-name: Render Manim Animation
+name: Render reel
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main]
+    paths:
+      - "free_fall_orbit.py"
+      - ".github/workflows/render.yml"
   workflow_dispatch:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   render:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
+          cache: pip
 
-      - name: Install System Dependencies & TeXLive
+      # Cairo/Pango for Manim, ffmpeg for encoding, TeX + dvisvgm for MathTex
+      - name: Install system packages
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            ffmpeg \
-            libpango1.0-dev \
-            pkg-config \
-            dvisvgm \
-            texlive-latex-base \
-            texlive-latex-extra \
-            texlive-fonts-recommended
+            build-essential pkg-config python3-dev \
+            libcairo2-dev libpango1.0-dev ffmpeg \
+            texlive-latex-base texlive-latex-extra texlive-fonts-recommended \
+            texlive-science dvisvgm fonts-dejavu
 
-      - name: Install Manim CE
+      - name: Install Manim
+        run: pip install "manim==0.21.0"
+
+      # The script sets 1080x1920 at 60 fps itself, so no quality flag is needed.
+      # Import-time physics assertions run first and fail the job if the sim breaks.
+      - name: Render
+        run: manim --disable_caching free_fall_orbit.py FreeFallOrbitMaster
+
+      - name: Locate output
+        id: out
         run: |
-          python -m pip install --upgrade pip
-          pip install manim
+          f=$(find media/videos -name "FreeFallOrbitMaster.mp4" -not -path "*partial_movie_files*" | head -n 1)
+          test -n "$f"
+          echo "path=$f" >> "$GITHUB_OUTPUT"
+          ffprobe -v error -show_entries stream=width,height,r_frame_rate:format=duration -of default=nw=1 "$f"
 
-      - name: Verify Script Exists
-        run: ls -la barycenter.py
-
-      - name: Render Video
-        run: |
-          manim -v WARNING barycenter.py SunBarycenterReel
-
-      - name: Upload Rendered MP4
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: sun-barycenter-vertical
-          path: media/videos/barycenter/*/*.mp4
+          name: FreeFallOrbitMaster
+          path: ${{ steps.out.outputs.path }}
           if-no-files-found: error
+          retention-days: 30
