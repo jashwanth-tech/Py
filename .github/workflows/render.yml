@@ -1,0 +1,60 @@
+name: Render Manim Animation
+
+on:
+  workflow_dispatch: # Allows manual trigger from the GitHub Actions tab
+  push:
+    paths:
+      - 'earth_reference_frames.py'
+      - '.github/workflows/render.yml'
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install System Dependencies & LaTeX Engine
+        # LaTeX packages (dvisvgm, texlive) are required to render MathTex in Scene 4
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            ffmpeg \
+            libcairo2-dev \
+            libpango1.0-dev \
+            pkg-config \
+            dvisvgm \
+            texlive-latex-base \
+            texlive-latex-extra \
+            texlive-fonts-recommended
+
+      - name: Install Python Packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install manim numpy
+
+      - name: Render Video with Manim
+        run: |
+          # Uses high-quality 1080x1920 portrait flag matching your script's config
+          manim -qh earth_reference_frames.py EarthReferenceFrames -o earth_reference_frames.mp4
+
+      - name: Prepare Artifact Directory
+        run: |
+          mkdir -p export
+          find media/videos/ -type f -name "*.mp4" -exec cp {} export/ \;
+          ls -lh export/
+
+      - name: Upload Video Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: earth-reference-frames-1080p
+          path: export/*.mp4
+          retention-days: 14
