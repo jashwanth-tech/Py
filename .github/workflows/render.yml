@@ -1,54 +1,631 @@
-name: Render reel
+name: Render Space Video
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "free_fall_orbit.py"
-      - ".github/workflows/render.yml"
   workflow_dispatch:
+    inputs:
+      preview_mode:
+        description: 'Run 10s preview (true) or full 45s render (false)?'
+        required: true
+        default: 'false'
+        type: boolean
 
 jobs:
   render:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          python-version: "3.12"
+          node-version: 20
 
-      # Cairo/Pango for Manim, ffmpeg for encoding, TeX + dvisvgm for MathTex
-      - name: Install system packages
+      - name: Bootstrap Project Files
+        run: |
+          mkdir -p src/modules src/shaders scripts public/assets/textures
+
+          # 1. package.json
+          cat << 'EOF' > package.json
+          {
+            "name": "space-motion-visualization",
+            "version": "1.0.0",
+            "type": "module",
+            "scripts": {
+              "render": "node scripts/render.js",
+              "render:preview": "node scripts/render.js --preview"
+            },
+            "dependencies": {
+              "express": "^4.19.2",
+              "puppeteer": "^22.6.0",
+              "three": "^0.163.0"
+            }
+          }
+          EOF
+
+          # 2. src/config.js
+          cat << 'EOF' > src/config.js
+          export const CONFIG = {
+            WIDTH: 1080,
+            HEIGHT: 1920,
+            FPS: 30,
+            DURATION: 45,
+            TOTAL_FRAMES: 30 * 45,
+            FOV: 48,
+            NEAR: 0.1,
+            FAR: 100000,
+            EARTH_TILT_DEG: 23.44,
+            ECLIPTIC_INCLINATION_TO_GALAXY_DEG: 60.19,
+            SUN_RADIUS: 14.0,
+            EARTH_RADIUS: 3.2,
+            EARTH_ORBIT_A: 95.0,
+            EARTH_ORBIT_E: 0.0167,
+            PLANETS: [
+              { name: 'Mercury', distance: 38,  radius: 1.2, period: 10.8, color: 0x888888 },
+              { name: 'Venus',   distance: 68,  radius: 2.8, period: 28.0, color: 0xe3bb76 },
+              { name: 'Earth',   distance: 95,  radius: 3.2, period: 45.0, color: 0x2277ff },
+              { name: 'Mars',    distance: 135, radius: 1.8, period: 84.6, color: 0xc1440e },
+              { name: 'Jupiter', distance: 220, radius: 7.2, period: 220.0, color: 0xb07f35 },
+              { name: 'Saturn',  distance: 310, radius: 6.0, period: 400.0, color: 0xe2bf7d, ring: true },
+              { name: 'Uranus',  distance: 390, radius: 4.0, period: 700.0, color: 0x4b70dd },
+              { name: 'Neptune', distance: 460, radius: 3.8, period: 900.0, color: 0x274687 }
+            ],
+            GALACTIC_CORE_RADIUS: 4200,
+            SUN_GALACTIC_DISTANCE: 7800,
+            GALAXY_PARTICLES: 120000,
+            GALAXY_ARMS: 2,
+            GALAXY_ARM_TWIST: 3.8,
+            ENABLE_ATMOSPHERE: true,
+            ENABLE_CLOUDS: true,
+            ENABLE_CITY_LIGHTS: true,
+            ENABLE_TRAILS: true,
+            TIMELINE: {
+              SCENE_1_EARTH:    { start: 0.00, end: 0.18, title: "EARTH'S ROTATION", subtitle: "Sidereal Period: 23h 56m | Axial Tilt: 23.44°" },
+              SCENE_2_ORBIT:    { start: 0.18, end: 0.38, title: "HELIOCENTRIC ORBIT", subtitle: "Speed: ~29.78 km/s | Distance: 1 AU" },
+              SCENE_3_SOLAR:    { start: 0.38, end: 0.58, title: "THE SOLAR SYSTEM", subtitle: "Keplerian Mechanics: Inner planets orbit faster" },
+              SCENE_4_GALAXY:   { start: 0.58, end: 0.82, title: "THE MILKY WAY", subtitle: "Galactic Speed: ~220 km/s | Period: ~230 Myr" },
+              SCENE_5_COMBINED: { start: 0.82, end: 1.00, title: "COMBINED MOTION", subtitle: "Trajectory depends entirely on your Reference Frame" }
+            }
+          };
+          EOF
+
+          # 3. src/shaders/atmosphereShader.js
+          cat << 'EOF' > src/shaders/atmosphereShader.js
+          export const AtmosphereShader = {
+            vertexShader: `
+              varying vec3 vNormal;
+              varying vec3 vWorldPosition;
+              void main() {
+                vNormal = normalize(normalMatrix * normal);
+                vec4 worldPos = modelMatrix * vec4(position, 1.0);
+                vWorldPosition = worldPos.xyz;
+                gl_Position = projectionMatrix * viewMatrix * worldPos;
+              }
+            `,
+            fragmentShader: `
+              varying vec3 vNormal;
+              varying vec3 vWorldPosition;
+              uniform vec3 uSunPosition;
+              uniform vec3 uAtmosphereColor;
+              void main() {
+                vec3 lightDir = normalize(uSunPosition - vWorldPosition);
+                vec3 viewDir = normalize(cameraPosition - vWorldPosition);
+                float fresnel = 1.0 - max(dot(viewDir, vNormal), 0.0);
+                fresnel = pow(fresnel, 2.8);
+                float lightIntensity = max(dot(vNormal, lightDir), 0.0);
+                float rimIntensity = fresnel * (lightIntensity * 0.85 + 0.15);
+                gl_FragColor = vec4(uAtmosphereColor, rimIntensity * 0.9);
+              }
+            `
+          };
+          EOF
+
+          # 4. src/modules/proceduralTextures.js
+          cat << 'EOF' > src/modules/proceduralTextures.js
+          import * as THREE from 'three';
+          export class ProceduralTextures {
+            static createNoiseCanvas(width, height, generatorFn) {
+              const canvas = document.createElement('canvas');
+              canvas.width = width;
+              canvas.height = height;
+              const ctx = canvas.getContext('2d');
+              const imgData = ctx.createImageData(width, height);
+              generatorFn(imgData.data, width, height);
+              ctx.putImageData(imgData, 0, 0);
+              return new THREE.CanvasTexture(canvas);
+            }
+            static createEarthDiffuse() {
+              return this.createNoiseCanvas(2048, 1024, (data, w, h) => {
+                for (let y = 0; y < h; y++) {
+                  const lat = (y / h) * Math.PI - Math.PI / 2.0;
+                  for (let x = 0; x < w; x++) {
+                    const lon = (x / w) * Math.PI * 2.0 - Math.PI;
+                    const idx = (y * w + x) * 4;
+                    let n = Math.sin(lon * 3.0) * Math.cos(lat * 2.0)
+                          + Math.sin(lon * 7.0 + lat * 4.0) * 0.4
+                          + Math.cos(lon * 13.0 - lat * 8.0) * 0.2;
+                    const isLand = n > 0.12 && Math.abs(lat) < 1.35;
+                    const isIce = Math.abs(lat) >= 1.35 || (Math.abs(lat) > 1.15 && n > 0.2);
+                    if (isIce) {
+                      data[idx] = 230; data[idx + 1] = 240; data[idx + 2] = 250;
+                    } else if (isLand) {
+                      data[idx] = 45 + n * 30; data[idx + 1] = 110 + n * 40; data[idx + 2] = 40 + n * 20;
+                    } else {
+                      const depth = Math.max(0.0, -n);
+                      data[idx] = 10; data[idx + 1] = 45 + Math.floor(depth * 30); data[idx + 2] = 120 + Math.floor(depth * 40);
+                    }
+                    data[idx + 3] = 255;
+                  }
+                }
+              });
+            }
+            static createEarthClouds() {
+              return this.createNoiseCanvas(1024, 512, (data, w, h) => {
+                for (let y = 0; y < h; y++) {
+                  const lat = (y / h) * Math.PI;
+                  for (let x = 0; x < w; x++) {
+                    const lon = (x / w) * Math.PI * 2.0;
+                    const idx = (y * w + x) * 4;
+                    const swirl = Math.sin(lon * 5.0 + Math.cos(lat * 8.0) * 2.0)
+                                + Math.sin(lon * 12.0 - lat * 6.0) * 0.5;
+                    const cloud = swirl > 0.45 ? (swirl - 0.45) * 450 : 0;
+                    const val = Math.min(255, Math.floor(cloud));
+                    data[idx] = val; data[idx + 1] = val; data[idx + 2] = val;
+                    data[idx + 3] = val > 10 ? Math.floor(val * 0.85) : 0;
+                  }
+                }
+              });
+            }
+            static createSunTexture() {
+              return this.createNoiseCanvas(1024, 512, (data, w, h) => {
+                for (let y = 0; y < h; y++) {
+                  for (let x = 0; x < w; x++) {
+                    const idx = (y * w + x) * 4;
+                    const n = Math.sin(x * 0.08) * Math.cos(y * 0.08) + Math.sin(x * 0.2 + y * 0.1) * 0.5;
+                    const bright = 0.85 + n * 0.15;
+                    data[idx] = Math.min(255, Math.floor(255 * bright));
+                    data[idx + 1] = Math.min(255, Math.floor(210 * bright));
+                    data[idx + 2] = Math.min(255, Math.floor(130 * bright));
+                    data[idx + 3] = 255;
+                  }
+                }
+              });
+            }
+          }
+          EOF
+
+          # 5. src/modules/celestialFactory.js
+          cat << 'EOF' > src/modules/celestialFactory.js
+          import * as THREE from 'three';
+          import { CONFIG } from '../config.js';
+          import { AtmosphereShader } from '../shaders/atmosphereShader.js';
+          import { ProceduralTextures } from './proceduralTextures.js';
+          export class CelestialFactory {
+            constructor() {
+              this.diffuseMap = ProceduralTextures.createEarthDiffuse();
+              this.cloudsMap = ProceduralTextures.createEarthClouds();
+              this.sunMap = ProceduralTextures.createSunTexture();
+            }
+            createEarthSystem() {
+              const earthOrbitGroup = new THREE.Group();
+              const earthTiltGroup = new THREE.Group();
+              earthTiltGroup.rotation.z = THREE.MathUtils.degToRad(CONFIG.EARTH_TILT_DEG);
+              earthOrbitGroup.add(earthTiltGroup);
+
+              const earthSpinGroup = new THREE.Group();
+              earthTiltGroup.add(earthSpinGroup);
+
+              const earthGeo = new THREE.SphereGeometry(CONFIG.EARTH_RADIUS, 64, 64);
+              const earthMat = new THREE.MeshStandardMaterial({ map: this.diffuseMap, roughness: 0.65, metalness: 0.1 });
+              const earthMesh = new THREE.Mesh(earthGeo, earthMat);
+              earthSpinGroup.add(earthMesh);
+
+              if (CONFIG.ENABLE_CLOUDS) {
+                const cloudGeo = new THREE.SphereGeometry(CONFIG.EARTH_RADIUS * 1.015, 64, 64);
+                const cloudMat = new THREE.MeshStandardMaterial({ map: this.cloudsMap, transparent: true, opacity: 0.85 });
+                earthSpinGroup.add(new THREE.Mesh(cloudGeo, cloudMat));
+              }
+
+              if (CONFIG.ENABLE_ATMOSPHERE) {
+                const atmoGeo = new THREE.SphereGeometry(CONFIG.EARTH_RADIUS * 1.12, 48, 48);
+                const atmoMat = new THREE.ShaderMaterial({
+                  vertexShader: AtmosphereShader.vertexShader,
+                  fragmentShader: AtmosphereShader.fragmentShader,
+                  uniforms: {
+                    uSunPosition: { value: new THREE.Vector3(0, 0, 0) },
+                    uAtmosphereColor: { value: new THREE.Color(0x55a4ff) }
+                  },
+                  blending: THREE.AdditiveBlending,
+                  side: THREE.BackSide,
+                  transparent: true
+                });
+                const atmoMesh = new THREE.Mesh(atmoGeo, atmoMat);
+                atmoMesh.name = "AtmosphereMesh";
+                earthTiltGroup.add(atmoMesh);
+              }
+              return { earthOrbitGroup, earthTiltGroup, earthSpinGroup, earthMesh };
+            }
+            createSun() {
+              const sunGroup = new THREE.Group();
+              const sunMesh = new THREE.Mesh(
+                new THREE.SphereGeometry(CONFIG.SUN_RADIUS, 48, 48),
+                new THREE.MeshBasicMaterial({ map: this.sunMap, color: 0xfff3d6 })
+              );
+              sunGroup.add(sunMesh);
+              sunGroup.add(new THREE.PointLight(0xffffff, 2.5, 4000, 0.4));
+              return sunGroup;
+            }
+            createPlanets() {
+              const planetMeshes = [];
+              CONFIG.PLANETS.forEach(p => {
+                if (p.name === 'Earth') return;
+                const group = new THREE.Group();
+                const mesh = new THREE.Mesh(
+                  new THREE.SphereGeometry(p.radius, 32, 32),
+                  new THREE.MeshStandardMaterial({ color: p.color, roughness: 0.7 })
+                );
+                mesh.position.x = p.distance;
+                group.add(mesh);
+                if (p.ring) {
+                  const ring = new THREE.Mesh(
+                    new THREE.RingGeometry(p.radius * 1.4, p.radius * 2.3, 48),
+                    new THREE.MeshBasicMaterial({ color: 0xd9c59e, side: THREE.DoubleSide, transparent: true, opacity: 0.7 })
+                  );
+                  ring.rotation.x = Math.PI / 2.3;
+                  mesh.add(ring);
+                }
+                planetMeshes.push({ config: p, group, mesh });
+              });
+              return planetMeshes;
+            }
+          }
+          EOF
+
+          # 6. src/modules/galaxyFactory.js
+          cat << 'EOF' > src/modules/galaxyFactory.js
+          import * as THREE from 'three';
+          import { CONFIG } from '../config.js';
+          export class GalaxyFactory {
+            static createMilkyWay() {
+              const galaxyGroup = new THREE.Group();
+              const count = CONFIG.GALAXY_PARTICLES;
+              const positions = new Float32Array(count * 3);
+              const colors = new Float32Array(count * 3);
+              const colorCore = new THREE.Color(0xffdfa9);
+              const colorArm = new THREE.Color(0x7ea9ff);
+
+              for (let i = 0; i < count; i++) {
+                const i3 = i * 3;
+                const r = Math.pow(Math.random(), 2.2) * CONFIG.GALACTIC_CORE_RADIUS * 2.4;
+                const armAngle = (i % CONFIG.GALAXY_ARMS) * (2 * Math.PI / CONFIG.GALAXY_ARMS);
+                const twist = r * (CONFIG.GALAXY_ARM_TWIST / 10000.0);
+                const z = (Math.random() - 0.5) * (Math.exp(-r / 3500.0) * 450.0 + 30.0) * 2.0;
+                const scatter = Math.pow(Math.random(), 2.0) * (r * 0.16 + 25.0);
+                const scatterAngle = Math.random() * Math.PI * 2.0;
+
+                positions[i3] = Math.cos(armAngle + twist) * r + Math.cos(scatterAngle) * scatter;
+                positions[i3 + 1] = z;
+                positions[i3 + 2] = Math.sin(armAngle + twist) * r + Math.sin(scatterAngle) * scatter;
+
+                const mixed = colorCore.clone().lerp(colorArm, Math.min(1.0, r / (CONFIG.GALACTIC_CORE_RADIUS * 2.0)));
+                colors[i3] = mixed.r; colors[i3 + 1] = mixed.g; colors[i3 + 2] = mixed.b;
+              }
+              const geo = new THREE.BufferGeometry();
+              geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+              geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+              galaxyGroup.add(new THREE.Points(geo, new THREE.PointsMaterial({
+                size: 14.0, vertexColors: true, transparent: true, opacity: 0.75, blending: THREE.AdditiveBlending, depthWrite: false
+              })));
+              return galaxyGroup;
+            }
+          }
+          EOF
+
+          # 7. src/modules/trajectoryManager.js
+          cat << 'EOF' > src/modules/trajectoryManager.js
+          import * as THREE from 'three';
+          export class TrajectoryManager {
+            constructor(scene) {
+              this.maxPoints = 800;
+              this.galacticPoints = [];
+              const galGeo = new THREE.BufferGeometry();
+              galGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(this.maxPoints * 3), 3));
+              this.galacticMaterial = new THREE.LineBasicMaterial({ color: 0xffaa00, transparent: true, opacity: 0.65, blending: THREE.AdditiveBlending });
+              this.galacticTrail = new THREE.Line(galGeo, this.galacticMaterial);
+              scene.add(this.galacticTrail);
+            }
+            recordGalacticPoint(pos) {
+              this.galacticPoints.push(pos.clone());
+              if (this.galacticPoints.length > this.maxPoints) this.galacticPoints.shift();
+              const attr = this.galacticTrail.geometry.attributes.position;
+              for (let i = 0; i < this.galacticPoints.length; i++) {
+                attr.setXYZ(i, this.galacticPoints[i].x, this.galacticPoints[i].y, this.galacticPoints[i].z);
+              }
+              this.galacticTrail.geometry.setDrawRange(0, this.galacticPoints.length);
+              attr.needsUpdate = true;
+            }
+            setOpacity(op) { this.galacticMaterial.opacity = op; }
+          }
+          EOF
+
+          # 8. src/modules/cameraRig.js
+          cat << 'EOF' > src/modules/cameraRig.js
+          import * as THREE from 'three';
+          import { CONFIG } from '../config.js';
+          export class CameraRig {
+            constructor(camera) {
+              this.camera = camera;
+              this.target = new THREE.Vector3();
+            }
+            ease(t) { return t * t * (3 - 2 * t); }
+            update(progress, earthMesh, sunGroup) {
+              const earthPos = new THREE.Vector3();
+              earthMesh.getWorldPosition(earthPos);
+              const sunPos = new THREE.Vector3();
+              sunGroup.getWorldPosition(sunPos);
+
+              if (progress <= 0.18) {
+                const t = this.ease(progress / 0.18);
+                this.camera.position.copy(earthPos).add(new THREE.Vector3(Math.sin(t * 0.5) * 8.5, 2.5 + t * 1.5, Math.cos(t * 0.5) * 9.5));
+                this.target.copy(earthPos);
+              } else if (progress <= 0.38) {
+                const t = this.ease((progress - 0.18) / 0.20);
+                this.camera.position.lerpVectors(earthPos.clone().add(new THREE.Vector3(8.5, 4.0, 9.5)), sunPos.clone().add(new THREE.Vector3(0, 160, 240)), t);
+                this.target.lerpVectors(earthPos, sunPos, t * 0.7);
+              } else if (progress <= 0.58) {
+                const t = this.ease((progress - 0.38) / 0.20);
+                this.camera.position.lerpVectors(sunPos.clone().add(new THREE.Vector3(0, 160, 240)), sunPos.clone().add(new THREE.Vector3(0, 680, 850)), t);
+                this.target.copy(sunPos);
+              } else if (progress <= 0.82) {
+                const t = this.ease((progress - 0.58) / 0.24);
+                this.camera.position.lerpVectors(sunPos.clone().add(new THREE.Vector3(0, 680, 850)), new THREE.Vector3(0, 9500, 14500), t);
+                this.target.lerpVectors(sunPos, new THREE.Vector3(0, 0, 0), t * 0.8);
+              } else {
+                this.camera.position.lerp(sunPos.clone().add(new THREE.Vector3(-450, 280, 520)), 0.1);
+                this.target.copy(sunPos);
+              }
+              this.camera.lookAt(this.target);
+            }
+          }
+          EOF
+
+          # 9. src/modules/hudOverlay.js
+          cat << 'EOF' > src/modules/hudOverlay.js
+          import { CONFIG } from '../config.js';
+          export class HudOverlay {
+            constructor() {
+              this.container = document.createElement('div');
+              this.container.style.cssText = `
+                position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;
+                display: flex; flex-direction: column; justify-content: space-between; padding: 60px 40px;
+                box-sizing: border-box; font-family: -apple-system, sans-serif; color: #ffffff; z-index: 10;
+              `;
+              this.container.innerHTML = `
+                <div>
+                  <div style="font-size: 16px; letter-spacing: 4px; color: #55a4ff; font-weight: 700;">ASTRONOMICAL DYNAMICS</div>
+                  <div id="hud-title" style="font-size: 38px; font-weight: 800; margin-top: 8px;">EARTH'S ROTATION</div>
+                  <div id="hud-subtitle" style="font-size: 18px; opacity: 0.75; margin-top: 6px;">Sidereal Period: 23h 56m</div>
+                </div>
+                <div style="display: flex; justify-content: space-between; border-top: 1px solid rgba(255,255,255,0.2); padding-top: 16px;">
+                  <div><div style="font-size: 12px; opacity: 0.5;">SCALE</div><div id="hud-scale" style="font-size: 18px; font-weight: 600; color: #ffd269;">PLANETOCENTRIC</div></div>
+                  <div style="text-align: right;"><div style="font-size: 12px; opacity: 0.5;">FRAME</div><div id="hud-frame" style="font-size: 18px; font-weight: 600;">EARTH SURFACE</div></div>
+                </div>
+              `;
+              document.body.appendChild(this.container);
+              this.titleEl = document.getElementById('hud-title');
+              this.subEl = document.getElementById('hud-subtitle');
+              this.scaleEl = document.getElementById('hud-scale');
+              this.frameEl = document.getElementById('hud-frame');
+            }
+            update(p) {
+              let scene = CONFIG.TIMELINE.SCENE_1_EARTH, s = "PLANETOCENTRIC", f = "EARTH FRAME";
+              if (p > 0.82) { scene = CONFIG.TIMELINE.SCENE_5_COMBINED; s = "SYNTHESIS"; f = "GALACTIC FRAME"; }
+              else if (p > 0.58) { scene = CONFIG.TIMELINE.SCENE_4_GALAXY; s = "GALACTIC [100k LY]"; f = "MILKY WAY CORE"; }
+              else if (p > 0.38) { scene = CONFIG.TIMELINE.SCENE_3_SOLAR; s = "HELIOCENTRIC [50 AU]"; f = "SOLAR BARYCENTER"; }
+              else if (p > 0.18) { scene = CONFIG.TIMELINE.SCENE_2_ORBIT; s = "ORBITAL [1 AU]"; f = "SUN FRAME"; }
+              if (this.titleEl.innerText !== scene.title) {
+                this.titleEl.innerText = scene.title;
+                this.subEl.innerText = scene.subtitle;
+                this.scaleEl.innerText = s;
+                this.frameEl.innerText = f;
+              }
+            }
+          }
+          EOF
+
+          # 10. src/scene.js
+          cat << 'EOF' > src/scene.js
+          import * as THREE from 'three';
+          import { CONFIG } from './config.js';
+          import { CelestialFactory } from './modules/celestialFactory.js';
+          import { GalaxyFactory } from './modules/galaxyFactory.js';
+          import { TrajectoryManager } from './modules/trajectoryManager.js';
+          import { CameraRig } from './modules/cameraRig.js';
+          import { HudOverlay } from './modules/hudOverlay.js';
+
+          export class AppScene {
+            constructor() {
+              this.canvas = document.getElementById('webgl-canvas');
+              this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, preserveDrawingBuffer: true });
+              this.renderer.setSize(CONFIG.WIDTH, CONFIG.HEIGHT, false);
+              this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+
+              this.scene = new THREE.Scene();
+              this.camera = new THREE.PerspectiveCamera(CONFIG.FOV, CONFIG.WIDTH / CONFIG.HEIGHT, CONFIG.NEAR, CONFIG.FAR);
+
+              this.celestialFactory = new CelestialFactory();
+              this.cameraRig = new CameraRig(this.camera);
+              this.hud = new HudOverlay();
+              this.trajectoryManager = new TrajectoryManager(this.scene);
+
+              this.milkyWay = GalaxyFactory.createMilkyWay();
+              this.scene.add(this.milkyWay);
+
+              this.solarSystemBarycenter = new THREE.Group();
+              this.solarSystemBarycenter.rotation.x = THREE.MathUtils.degToRad(CONFIG.ECLIPTIC_INCLINATION_TO_GALAXY_DEG);
+              this.milkyWay.add(this.solarSystemBarycenter);
+
+              this.sunGroup = this.celestialFactory.createSun();
+              this.solarSystemBarycenter.add(this.sunGroup);
+
+              this.planetMeshes = this.celestialFactory.createPlanets();
+              this.planetMeshes.forEach(p => this.solarSystemBarycenter.add(p.group));
+
+              const earth = this.celestialFactory.createEarthSystem();
+              this.earthOrbitGroup = earth.earthOrbitGroup;
+              this.earthTiltGroup = earth.earthTiltGroup;
+              this.earthSpinGroup = earth.earthSpinGroup;
+              this.earthMesh = earth.earthMesh;
+              this.solarSystemBarycenter.add(this.earthOrbitGroup);
+              this.scene.add(new THREE.AmbientLight(0xddeeff, 0.15));
+            }
+            updateAtTime(t) {
+              const p = Math.min(1.0, Math.max(0.0, t / CONFIG.DURATION));
+              this.earthSpinGroup.rotation.y = t * ((2 * Math.PI) / 1.5);
+              const earthAngle = (t / CONFIG.PLANETS[2].period) * Math.PI * 2;
+              this.earthTiltGroup.rotation.y = -earthAngle;
+              this.earthOrbitGroup.position.set(Math.cos(earthAngle) * CONFIG.EARTH_ORBIT_A, 0, Math.sin(earthAngle) * CONFIG.EARTH_ORBIT_A);
+
+              this.planetMeshes.forEach(pl => {
+                const a = (t / pl.config.period) * Math.PI * 2;
+                pl.mesh.position.set(Math.cos(a) * pl.config.distance, 0, Math.sin(a) * pl.config.distance);
+              });
+
+              const galAngle = t * 0.045;
+              this.solarSystemBarycenter.position.set(Math.cos(galAngle) * CONFIG.SUN_GALACTIC_DISTANCE, 0, Math.sin(galAngle) * CONFIG.SUN_GALACTIC_DISTANCE);
+              this.solarSystemBarycenter.rotation.y = -galAngle;
+
+              const atmo = this.earthTiltGroup.getObjectByName("AtmosphereMesh");
+              if (atmo) {
+                const sPos = new THREE.Vector3();
+                this.sunGroup.getWorldPosition(sPos);
+                atmo.material.uniforms.uSunPosition.value.copy(sPos);
+              }
+
+              const ePos = new THREE.Vector3();
+              this.earthMesh.getWorldPosition(ePos);
+              this.trajectoryManager.recordGalacticPoint(ePos);
+              this.trajectoryManager.setOpacity(p < 0.3 ? 0.0 : 0.7);
+
+              this.cameraRig.update(p, this.earthMesh, this.sunGroup);
+              this.hud.update(p);
+              this.renderer.render(this.scene, this.camera);
+            }
+          }
+          EOF
+
+          # 11. public/index.html
+          cat << 'EOF' > public/index.html
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8">
+            <style>
+              body { margin: 0; overflow: hidden; background: #000; }
+              #webgl-canvas { width: 1080px; height: 1920px; display: block; }
+            </style>
+            <script type="importmap">
+              { "imports": { "three": "https://unpkg.com/three@0.163.0/build/three.module.js" } }
+            </script>
+          </head>
+          <body>
+            <canvas id="webgl-canvas" width="1080" height="1920"></canvas>
+            <script type="module">
+              import { AppScene } from '../src/scene.js';
+              import { CONFIG } from '../src/config.js';
+              const app = new AppScene();
+              window.renderFrame = (frame, total) => {
+                app.updateAtTime((frame / total) * CONFIG.DURATION);
+              };
+            </script>
+          </body>
+          </html>
+          EOF
+
+          # 12. scripts/render.js
+          cat << 'EOF' > scripts/render.js
+          import express from 'express';
+          import puppeteer from 'puppeteer';
+          import { spawn } from 'child_process';
+          import path from 'path';
+          import fs from 'fs';
+          import { fileURLToPath } from 'url';
+
+          const __dirname = path.dirname(fileURLToPath(import.meta.url));
+          const ROOT = path.resolve(__dirname, '..');
+          const isPreview = process.argv.includes('--preview');
+
+          const FPS = isPreview ? 15 : 30;
+          const DURATION = isPreview ? 10 : 45;
+          const TOTAL_FRAMES = FPS * DURATION;
+          const OUT_DIR = path.join(ROOT, 'output');
+          const OUT_FILE = path.join(OUT_DIR, 'milky_way_solar_system.mp4');
+
+          if (!fs.existsSync(OUT_DIR)) fs.mkdirSync(OUT_DIR, { recursive: true });
+
+          const app = express();
+          app.use(express.static(ROOT));
+          const server = app.listen(8085, async () => {
+            console.log(`[Render] Starting: 1080x1920 @ ${FPS} FPS (${TOTAL_FRAMES} frames)`);
+            const ffmpeg = spawn('ffmpeg', [
+              '-y', '-f', 'image2pipe', '-vcodec', 'png', '-r', String(FPS),
+              '-i', '-', '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
+              '-pix_fmt', 'yuv420p', '-movflags', '+faststart', OUT_FILE
+            ]);
+
+            const browser = await puppeteer.launch({
+              headless: 'new',
+              args: [
+                '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+                '--enable-webgl', '--ignore-gpu-blocklist', '--use-gl=angle', '--use-angle=swiftshader',
+                '--window-size=1080,1920'
+              ]
+            });
+
+            const page = await browser.newPage();
+            await page.setViewport({ width: 1080, height: 1920, deviceScaleFactor: 1 });
+            await page.goto('http://localhost:8085/public/index.html', { waitUntil: 'networkidle0' });
+
+            for (let f = 0; f < TOTAL_FRAMES; f++) {
+              await page.evaluate((curr, tot) => window.renderFrame(curr, tot), f, TOTAL_FRAMES);
+              const canvas = await page.$('#webgl-canvas');
+              const buf = await canvas.screenshot({ type: 'png' });
+              ffmpeg.stdin.write(buf);
+              if (f % 30 === 0 || f === TOTAL_FRAMES - 1) {
+                console.log(`[Progress] Frame ${f + 1}/${TOTAL_FRAMES} (${(((f + 1)/TOTAL_FRAMES)*100).toFixed(1)}%)`);
+              }
+            }
+
+            ffmpeg.stdin.end();
+            await new Promise(res => ffmpeg.on('close', res));
+            await browser.close();
+            server.close();
+            console.log('[Render Complete] Saved to:', OUT_FILE);
+            process.exit(0);
+          });
+          EOF
+
+      - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config python3-dev \
-            libcairo2-dev libpango1.0-dev ffmpeg \
-            texlive-latex-base texlive-latex-extra texlive-fonts-recommended \
-            texlive-science dvisvgm fonts-dejavu
+          sudo apt-get install -y ffmpeg xvfb libgbm-dev libnss3 libasound2t64
 
-      - name: Install Manim
-        run: pip install "manim==0.21.0"
+      - name: Install Node Dependencies
+        run: npm install
 
-      # The script sets 1080x1920 at 60 fps itself, so no quality flag is needed.
-      # Import-time physics assertions run first and fail the job if the sim breaks.
-      - name: Render
-        run: manim --disable_caching free_fall_orbit.py FreeFallOrbitMaster
-
-      - name: Locate output
-        id: out
+      - name: Run Cloud Headless Render
         run: |
-          f=$(find media/videos -name "FreeFallOrbitMaster.mp4" -not -path "*partial_movie_files*" | head -n 1)
-          test -n "$f"
-          echo "path=$f" >> "$GITHUB_OUTPUT"
-          ffprobe -v error -show_entries stream=width,height,r_frame_rate:format=duration -of default=nw=1 "$f"
+          if [ "${{ github.event.inputs.preview_mode }}" = "true" ]; then
+            xvfb-run --auto-servernum --server-args="-screen 0 1080x1920x24" npm run render:preview
+          else
+            xvfb-run --auto-servernum --server-args="-screen 0 1080x1920x24" npm run render
+          fi
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload Video Artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: FreeFallOrbitMaster
-          path: ${{ steps.out.outputs.path }}
-          if-no-files-found: error
-          retention-days: 30
+          name: cosmic-dynamics-video
+          path: output/milky_way_solar_system.mp4
+          retention-days: 14
