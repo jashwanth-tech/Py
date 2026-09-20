@@ -1,0 +1,740 @@
+name: Render Cinematic Space Film
+
+on:
+  workflow_dispatch:
+    inputs:
+      preview_mode:
+        description: 'Render fast 10s preview (true) or full 50s master film (false)?'
+        required: true
+        default: 'false'
+        type: boolean
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install System Graphics & FFmpeg Pipeline
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ffmpeg \
+            xvfb \
+            mesa-utils \
+            libgl1-mesa-dri \
+            libgl1 \
+            libglx-mesa0 \
+            libgbm-dev \
+            libnss3 \
+            libxss1 \
+            libatk-bridge2.0-0 \
+            libgtk-3-0
+
+      - name: Synthesize Entire Cinematic Project
+        run: |
+          mkdir -p public scripts output
+
+          # 1. package.json
+          cat << 'EOF' > package.json
+          {
+            "name": "cinematic-space-dynamics",
+            "version": "2.0.0",
+            "type": "module",
+            "scripts": {
+              "render": "node scripts/render.js",
+              "render:preview": "node scripts/render.js --preview"
+            },
+            "dependencies": {
+              "express": "^4.19.2",
+              "puppeteer": "^22.6.0",
+              "three": "^0.163.0"
+            }
+          }
+          EOF
+
+          # 2. scripts/render.js
+          cat << 'EOF' > scripts/render.js
+          import express from 'express';
+          import puppeteer from 'puppeteer';
+          import { spawn } from 'child_process';
+          import path from 'path';
+          import fs from 'fs';
+          import { fileURLToPath } from 'url';
+
+          const __dirname = path.dirname(fileURLToPath(import.meta.url));
+          const ROOT = path.resolve(__dirname, '..');
+          const isPreview = process.argv.includes('--preview');
+
+          const FPS = 30;
+          const DURATION = isPreview ? 10 : 50;
+          const TOTAL_FRAMES = FPS * DURATION;
+          const OUT_DIR = path.join(ROOT, 'output');
+          const OUT_FILE = path.join(OUT_DIR, 'space_motion_masterpiece.mp4');
+
+          if (!fs.existsSync(OUT_DIR)) fs.mkdirSync(OUT_DIR, { recursive: true });
+
+          const app = express();
+          app.use(express.static(ROOT));
+          const server = app.listen(8085, async () => {
+            console.log(`[Director Engine] Film Resolution: 1080x1920 (9:16 Vertical)`);
+            console.log(`[Director Engine] Frame Target: ${TOTAL_FRAMES} frames @ ${FPS} FPS (${DURATION} seconds)`);
+
+            const ffmpeg = spawn('ffmpeg', [
+              '-y', '-f', 'image2pipe', '-vcodec', 'png', '-r', String(FPS),
+              '-i', '-', '-c:v', 'libx264', '-preset', 'slow', '-crf', '16',
+              '-pix_fmt', 'yuv420p', '-movflags', '+faststart', OUT_FILE
+            ]);
+
+            ffmpeg.stderr.on('data', (d) => {
+              const msg = d.toString();
+              if (msg.includes('Error') || msg.includes('fatal')) console.error(`[FFmpeg] ${msg}`);
+            });
+
+            const browser = await puppeteer.launch({
+              headless: 'new',
+              args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu-sandbox',
+                '--enable-webgl',
+                '--ignore-gpu-blocklist',
+                '--use-gl=angle',
+                '--use-angle=gl',
+                '--window-size=1080,1920'
+              ]
+            });
+
+            const page = await browser.newPage();
+            await page.setViewport({ width: 1080, height: 1920, deviceScaleFactor: 1 });
+
+            page.on('console', msg => console.log(`[Browser Engine] ${msg.text()}`));
+            page.on('pageerror', err => console.error(`[Browser Runtime Error] ${err.toString()}`));
+
+            await page.goto('http://localhost:8085/public/index.html', { waitUntil: 'load' });
+
+            console.log('[Director Engine] Waiting for Three.js shaders and starfield compilation...');
+            await page.waitForFunction(() => typeof window.renderMasterFrame === 'function', { timeout: 60000 });
+            console.log('[Director Engine] Shaders compiled. Commencing master frame capture.');
+
+            const startWallTime = Date.now();
+
+            for (let f = 0; f < TOTAL_FRAMES; f++) {
+              await page.evaluate((frameIdx, total) => window.renderMasterFrame(frameIdx, total), f, TOTAL_FRAMES);
+              const canvas = await page.$('#webgl-canvas');
+              const frameBuffer = await canvas.screenshot({ type: 'png' });
+              ffmpeg.stdin.write(frameBuffer);
+
+              if (f % 30 === 0 || f === TOTAL_FRAMES - 1) {
+                const elapsedSec = ((Date.now() - startWallTime) / 1000).toFixed(1);
+                const percent = (((f + 1) / TOTAL_FRAMES) * 100).toFixed(1);
+                const fpsReal = ((f + 1) / (Date.now() - startWallTime) * 1000).toFixed(2);
+                console.log(`[Render Shot] Frame ${f + 1}/${TOTAL_FRAMES} (${percent}%) | Elapsed: ${elapsedSec}s | Speed: ${fpsReal} FPS`);
+              }
+            }
+
+            ffmpeg.stdin.end();
+            await new Promise(res => ffmpeg.on('close', res));
+            await browser.close();
+            server.close();
+            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+            console.log(`[Masterpiece Complete] Output saved to: ${OUT_FILE}`);
+            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+            process.exit(0);
+          });
+          EOF
+
+          # 3. public/index.html
+          cat << 'EOF' > public/index.html
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <title>Cosmic Dynamics: The Relativity of Motion</title>
+            <style>
+              * { box-sizing: border-box; margin: 0; padding: 0; }
+              body {
+                overflow: hidden;
+                background: #000002;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+                color: #ffffff;
+              }
+              #webgl-canvas {
+                width: 1080px;
+                height: 1920px;
+                display: block;
+              }
+              /* Cinematic Master HUD Layer */
+              #film-hud {
+                position: absolute;
+                top: 0;
+                left: 0;
+                width: 1080px;
+                height: 1920px;
+                pointer-events: none;
+                display: flex;
+                flex-direction: column;
+                justify-content: space-between;
+                padding: 100px 70px 90px 70px;
+                z-index: 100;
+              }
+              .hud-glass {
+                background: rgba(8, 12, 24, 0.45);
+                backdrop-filter: blur(12px);
+                border: 1px solid rgba(255, 255, 255, 0.12);
+                border-radius: 16px;
+                padding: 28px 36px;
+              }
+              .telemetry-row {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-top: 10px;
+              }
+              .telemetry-label {
+                font-size: 15px;
+                letter-spacing: 3px;
+                color: rgba(255, 255, 255, 0.55);
+                font-weight: 600;
+                text-transform: uppercase;
+              }
+              .telemetry-value {
+                font-size: 19px;
+                font-weight: 700;
+                color: #ffffff;
+                font-family: "SF Mono", "Roboto Mono", Menlo, monospace;
+              }
+              #act-indicator {
+                font-size: 16px;
+                letter-spacing: 5px;
+                color: #4ea8ff;
+                font-weight: 800;
+                text-transform: uppercase;
+                margin-bottom: 8px;
+              }
+              #shot-title {
+                font-size: 46px;
+                font-weight: 900;
+                letter-spacing: -1px;
+                line-height: 1.1;
+              }
+              /* Subtitle Teleprompter (Middle-Bottom Anchor) */
+              #teleprompter-box {
+                margin-top: auto;
+                margin-bottom: 30px;
+                background: rgba(3, 5, 12, 0.75);
+                border-left: 6px solid #4ea8ff;
+                border-radius: 4px 12px 12px 4px;
+                padding: 30px 36px;
+                box-shadow: 0 20px 50px rgba(0,0,0,0.8);
+              }
+              #sub-voiceover {
+                font-size: 32px;
+                line-height: 1.35;
+                font-weight: 600;
+                color: #f5f7fa;
+                letter-spacing: -0.2px;
+              }
+            </style>
+            <script type="importmap">
+              { "imports": { "three": "/node_modules/three/build/three.module.js" } }
+            </script>
+          </head>
+          <body>
+            <canvas id="webgl-canvas" width="1080" height="1920"></canvas>
+
+            <div id="film-hud">
+              <!-- Top Telemetry Panel -->
+              <div class="hud-glass">
+                <div id="act-indicator">ACT I — THE TERRESTRIAL FRAME</div>
+                <div id="shot-title">EARTH'S ROTATION</div>
+                <div class="telemetry-row">
+                  <span class="telemetry-label">Reference Frame</span>
+                  <span id="tel-frame" class="telemetry-value">EARTH CRUST (SURFACE)</span>
+                </div>
+                <div class="telemetry-row">
+                  <span class="telemetry-label">System Velocity</span>
+                  <span id="tel-speed" class="telemetry-value" style="color: #64d2ff;">1,674 KM/H</span>
+                </div>
+                <div class="telemetry-row">
+                  <span class="telemetry-label">Coordinate Scale</span>
+                  <span id="tel-scale" class="telemetry-value" style="color: #ffd60a;">PLANETOCENTRIC [1:10⁶]</span>
+                </div>
+              </div>
+
+              <!-- Lower Voiceover Subtitles -->
+              <div id="teleprompter-box">
+                <div style="font-size: 14px; letter-spacing: 3px; color: #4ea8ff; margin-bottom: 8px; font-weight: 700;">NARRATION / SCRIPT</div>
+                <div id="sub-voiceover">"Right now, sitting in your room, you feel completely motionless..."</div>
+              </div>
+
+              <!-- Bottom Invariant Telemetry -->
+              <div class="hud-glass" style="padding: 20px 36px;">
+                <div class="telemetry-row" style="margin-top: 0;">
+                  <span class="telemetry-label">Physical Invariant</span>
+                  <span id="tel-invariant" class="telemetry-value">AXIAL OBLIQUITY: 23.439°</span>
+                </div>
+              </div>
+            </div>
+
+            <script type="module">
+              import * as THREE from 'three';
+
+              const CONFIG = {
+                WIDTH: 1080,
+                HEIGHT: 1920,
+                DURATION: 50.0,
+                EARTH_TILT_DEG: 23.439,
+                ECLIPTIC_INCLINATION_TO_GALAXY_DEG: 60.19, // Exact astronomical tilt to Milky Way plane
+                SUN_RADIUS: 14.5,
+                EARTH_RADIUS: 3.4,
+                EARTH_ORBIT_A: 100.0,
+                SUN_GALACTIC_DISTANCE: 7000.0,
+                GALAXY_PARTICLES: 85000
+              };
+
+              // Canvas-based Procedural Texture Generators
+              function createNoiseTexture(w, h, fn) {
+                const c = document.createElement('canvas');
+                c.width = w; c.height = h;
+                const ctx = c.getContext('2d');
+                const img = ctx.createImageData(w, h);
+                fn(img.data, w, h);
+                ctx.putImageData(img, 0, 0);
+                return new THREE.CanvasTexture(c);
+              }
+
+              // Realistic Continent, Ocean & Ice Map
+              const earthTexture = createNoiseTexture(2048, 1024, (d, w, h) => {
+                for (let y = 0; y < h; y++) {
+                  const lat = (y / h) * Math.PI - Math.PI / 2.0;
+                  for (let x = 0; x < w; x++) {
+                    const lon = (x / w) * Math.PI * 2.0 - Math.PI;
+                    const idx = (y * w + x) * 4;
+
+                    const n1 = Math.sin(lon * 3.0) * Math.cos(lat * 2.0);
+                    const n2 = Math.sin(lon * 7.0 + lat * 4.0) * 0.4;
+                    const n3 = Math.cos(lon * 13.0 - lat * 8.0) * 0.2;
+                    const continent = n1 + n2 + n3;
+
+                    const isLand = continent > 0.12 && Math.abs(lat) < 1.35;
+                    const isIce = Math.abs(lat) >= 1.35 || (Math.abs(lat) > 1.15 && continent > 0.2);
+
+                    if (isIce) {
+                      d[idx] = 235; d[idx + 1] = 242; d[idx + 2] = 250;
+                    } else if (isLand) {
+                      d[idx] = 40 + continent * 30;
+                      d[idx + 1] = 115 + continent * 45;
+                      d[idx + 2] = 45 + continent * 20;
+                    } else {
+                      const depth = Math.max(0.0, -continent);
+                      d[idx] = 12;
+                      d[idx + 1] = 45 + Math.floor(depth * 35);
+                      d[idx + 2] = 135 + Math.floor(depth * 55);
+                    }
+                    d[idx + 3] = 255;
+                  }
+                }
+              });
+
+              // Dynamic Cloud Mask
+              const cloudTexture = createNoiseTexture(1024, 512, (d, w, h) => {
+                for (let y = 0; y < h; y++) {
+                  const lat = (y / h) * Math.PI;
+                  for (let x = 0; x < w; x++) {
+                    const lon = (x / w) * Math.PI * 2.0;
+                    const idx = (y * w + x) * 4;
+                    const swirl = Math.sin(lon * 4.0 + Math.cos(lat * 6.0) * 2.0) + Math.sin(lon * 10.0 - lat * 5.0) * 0.5;
+                    const val = swirl > 0.4 ? Math.min(255, Math.floor((swirl - 0.4) * 480)) : 0;
+                    d[idx] = 255; d[idx + 1] = 255; d[idx + 2] = 255; d[idx + 3] = val;
+                  }
+                }
+              });
+
+              // Emissive Granulated Sun Texture
+              const sunTexture = createNoiseTexture(512, 256, (d, w, h) => {
+                for (let i = 0; i < w * h * 4; i += 4) {
+                  d[i] = 255; d[i + 1] = 225; d[i + 2] = 120; d[i + 3] = 255;
+                }
+              });
+
+              // Renderer Initialization with Mesa-compatible Software Fallback
+              const canvas = document.getElementById('webgl-canvas');
+              const glOptions = { antialias: true, preserveDrawingBuffer: true, failIfMajorPerformanceCaveat: false };
+              const glContext = canvas.getContext('webgl2', glOptions) || canvas.getContext('webgl', glOptions);
+
+              const renderer = new THREE.WebGLRenderer({ canvas, context: glContext, antialias: true, preserveDrawingBuffer: true });
+              renderer.setSize(CONFIG.WIDTH, CONFIG.HEIGHT, false);
+              renderer.toneMapping = THREE.ACESFilmicToneMapping;
+              renderer.toneMappingExposure = 1.15;
+
+              const scene = new THREE.Scene();
+              const camera = new THREE.PerspectiveCamera(46, CONFIG.WIDTH / CONFIG.HEIGHT, 0.1, 100000);
+
+              // 1. Galactic Starfield (100,000 Particle Spiral Disc + Bulge)
+              const galGeo = new THREE.BufferGeometry();
+              const galPos = new Float32Array(CONFIG.GALAXY_PARTICLES * 3);
+              const galColors = new Float32Array(CONFIG.GALAXY_PARTICLES * 3);
+              const colBulge = new THREE.Color(0xffdfa9);
+              const colArms = new THREE.Color(0x7ea9ff);
+
+              for (let i = 0; i < CONFIG.GALAXY_PARTICLES; i++) {
+                const i3 = i * 3;
+                const r = Math.pow(Math.random(), 2.2) * 8500.0;
+                const armIndex = i % 2;
+                const armAngle = armIndex * Math.PI;
+                const twist = r * 0.00038;
+                const z = (Math.random() - 0.5) * (Math.exp(-r / 3500.0) * 450.0 + 35.0);
+                const scatter = Math.pow(Math.random(), 2.0) * (r * 0.18 + 25.0);
+                const scatterAngle = Math.random() * Math.PI * 2.0;
+
+                galPos[i3] = Math.cos(armAngle + twist) * r + Math.cos(scatterAngle) * scatter;
+                galPos[i3 + 1] = z;
+                galPos[i3 + 2] = Math.sin(armAngle + twist) * r + Math.sin(scatterAngle) * scatter;
+
+                const mix = colBulge.clone().lerp(colArms, Math.min(1.0, r / 6500.0));
+                galColors[i3] = mix.r; galColors[i3 + 1] = mix.g; galColors[i3 + 2] = mix.b;
+              }
+              galGeo.setAttribute('position', new THREE.BufferAttribute(galPos, 3));
+              galGeo.setAttribute('color', new THREE.BufferAttribute(galColors, 3));
+              const galaxy = new THREE.Points(galGeo, new THREE.PointsMaterial({
+                size: 15.0, vertexColors: true, transparent: true, opacity: 0.75, blending: THREE.AdditiveBlending, depthWrite: false
+              }));
+              scene.add(galaxy);
+
+              // Galactic Orbit Guide Ring
+              const galRingCurve = new THREE.EllipseCurve(0, 0, CONFIG.SUN_GALACTIC_DISTANCE, CONFIG.SUN_GALACTIC_DISTANCE, 0, 2 * Math.PI);
+              const galRingPoints = galRingCurve.getPoints(240);
+              const galRingGeo = new THREE.BufferGeometry().setFromPoints(galRingPoints.map(p => new THREE.Vector3(p.x, 0, p.y)));
+              const galOrbitLine = new THREE.Line(galRingGeo, new THREE.LineBasicMaterial({ color: 0xffd269, transparent: true, opacity: 0.25 }));
+              galaxy.add(galOrbitLine);
+
+              // 2. Solar System Barycenter (Tilted 60.19° to Galactic Disc)
+              const solarBarycenter = new THREE.Group();
+              solarBarycenter.rotation.x = THREE.MathUtils.degToRad(CONFIG.ECLIPTIC_INCLINATION_TO_GALAXY_DEG);
+              galaxy.add(solarBarycenter);
+
+              // Sun & Ambient Corona
+              const sunMesh = new THREE.Mesh(
+                new THREE.SphereGeometry(CONFIG.SUN_RADIUS, 32, 32),
+                new THREE.MeshBasicMaterial({ map: sunTexture, color: 0xfff4d6 })
+              );
+              solarBarycenter.add(sunMesh);
+
+              const sunCorona = new THREE.Mesh(
+                new THREE.SphereGeometry(CONFIG.SUN_RADIUS * 1.25, 32, 32),
+                new THREE.MeshBasicMaterial({ color: 0xffaa22, transparent: true, opacity: 0.3, blending: THREE.AdditiveBlending, side: THREE.BackSide })
+              );
+              solarBarycenter.add(sunCorona);
+
+              const sunLight = new THREE.PointLight(0xffffff, 2.8, 5000, 0.4);
+              solarBarycenter.add(sunLight);
+              scene.add(new THREE.AmbientLight(0xdbe7ff, 0.12));
+
+              // 3. Planetary Family (Orderly Keplerian Motion)
+              const planetsData = [
+                { name: 'Mercury', dist: 38, rad: 1.2, color: 0x999999, period: 8.0 },
+                { name: 'Venus',   dist: 68, rad: 2.6, color: 0xe0c18d, period: 20.0 },
+                { name: 'Mars',    dist: 145, rad: 1.8, color: 0xc1440e, period: 70.0 },
+                { name: 'Jupiter', dist: 230, rad: 7.0, color: 0xb28346, period: 180.0 },
+                { name: 'Saturn',  dist: 320, rad: 5.8, color: 0xe5c88c, period: 320.0, ring: true }
+              ];
+              const planetObjects = [];
+
+              planetsData.forEach(p => {
+                const pGroup = new THREE.Group();
+                const pMesh = new THREE.Mesh(new THREE.SphereGeometry(p.rad, 24, 24), new THREE.MeshStandardMaterial({ color: p.color, roughness: 0.7 }));
+                pMesh.position.x = p.dist;
+                pGroup.add(pMesh);
+
+                if (p.ring) {
+                  const ringMesh = new THREE.Mesh(
+                    new THREE.RingGeometry(p.rad * 1.3, p.rad * 2.2, 32),
+                    new THREE.MeshBasicMaterial({ color: 0xd8bf8a, side: THREE.DoubleSide, transparent: true, opacity: 0.65 })
+                  );
+                  ringMesh.rotation.x = Math.PI / 2.3;
+                  pMesh.add(ringMesh);
+                }
+
+                // Orbital ring guide
+                const orbitCurve = new THREE.EllipseCurve(0, 0, p.dist, p.dist, 0, Math.PI * 2);
+                const orbitPoints = orbitCurve.getPoints(96);
+                const orbitGeo = new THREE.BufferGeometry().setFromPoints(orbitPoints.map(pt => new THREE.Vector3(pt.x, 0, pt.y)));
+                orbitGeo.rotateX(Math.PI / 2);
+                pGroup.add(new THREE.Line(orbitGeo, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.08 })));
+
+                solarBarycenter.add(pGroup);
+                planetObjects.push({ mesh: pMesh, group: pGroup, data: p });
+              });
+
+              // 4. Hierarchical Earth Sub-System
+              const earthOrbitGroup = new THREE.Group();
+              solarBarycenter.add(earthOrbitGroup);
+
+              const earthTiltGroup = new THREE.Group();
+              earthTiltGroup.rotation.z = THREE.MathUtils.degToRad(CONFIG.EARTH_TILT_DEG);
+              earthOrbitGroup.add(earthTiltGroup);
+
+              const earthSpinGroup = new THREE.Group();
+              earthTiltGroup.add(earthSpinGroup);
+
+              const earthMesh = new THREE.Mesh(
+                new THREE.SphereGeometry(CONFIG.EARTH_RADIUS, 48, 48),
+                new THREE.MeshStandardMaterial({ map: earthTexture, roughness: 0.62, metalness: 0.1 })
+              );
+              earthSpinGroup.add(earthMesh);
+
+              const cloudMesh = new THREE.Mesh(
+                new THREE.SphereGeometry(CONFIG.EARTH_RADIUS * 1.018, 48, 48),
+                new THREE.MeshStandardMaterial({ map: cloudTexture, transparent: true, opacity: 0.85 })
+              );
+              earthSpinGroup.add(cloudMesh);
+
+              // Atmospheric Fresnel Scattering Ring
+              const atmoMesh = new THREE.Mesh(
+                new THREE.SphereGeometry(CONFIG.EARTH_RADIUS * 1.12, 32, 32),
+                new THREE.ShaderMaterial({
+                  vertexShader: `
+                    varying vec3 vNormal;
+                    varying vec3 vWorldPosition;
+                    void main() {
+                      vNormal = normalize(normalMatrix * normal);
+                      vec4 worldPos = modelMatrix * vec4(position, 1.0);
+                      vWorldPosition = worldPos.xyz;
+                      gl_Position = projectionMatrix * viewMatrix * worldPos;
+                    }
+                  `,
+                  fragmentShader: `
+                    varying vec3 vNormal;
+                    varying vec3 vWorldPosition;
+                    uniform vec3 uSunPos;
+                    void main() {
+                      vec3 viewDir = normalize(cameraPosition - vWorldPosition);
+                      vec3 lightDir = normalize(uSunPos - vWorldPosition);
+                      float fresnel = pow(1.0 - max(dot(viewDir, vNormal), 0.0), 3.0);
+                      float light = max(dot(vNormal, lightDir), 0.0) * 0.8 + 0.2;
+                      gl_FragColor = vec4(0.33, 0.65, 1.0, fresnel * light * 0.9);
+                    }
+                  `,
+                  uniforms: { uSunPos: { value: new THREE.Vector3() } },
+                  side: THREE.BackSide,
+                  blending: THREE.AdditiveBlending,
+                  transparent: true
+                })
+              );
+              earthTiltGroup.add(atmoMesh);
+
+              // 5. Dynamic Trajectory Ribbons (Helical Path Visualization)
+              const MAX_TRAIL = 900;
+              const trailPoints = [];
+              const trailGeo = new THREE.BufferGeometry();
+              const trailPositions = new Float32Array(MAX_TRAIL * 3);
+              trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3));
+              const trailLine = new THREE.Line(trailGeo, new THREE.LineBasicMaterial({
+                color: 0xffa500,
+                transparent: true,
+                opacity: 0.75,
+                blending: THREE.AdditiveBlending
+              }));
+              scene.add(trailLine);
+
+              // HUD DOM Handles
+              const elAct = document.getElementById('act-indicator');
+              const elTitle = document.getElementById('shot-title');
+              const elFrame = document.getElementById('tel-frame');
+              const elSpeed = document.getElementById('tel-speed');
+              const elScale = document.getElementById('tel-scale');
+              const elInvariant = document.getElementById('tel-invariant');
+              const elVoice = document.getElementById('sub-voiceover');
+
+              function easeInOutCubic(t) {
+                return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+              }
+
+              // MASTER DETERMINISTIC FRAME RENDERER
+              window.renderMasterFrame = (frameIndex, totalFrames) => {
+                const progress = frameIndex / totalFrames;
+                const timeSec = progress * CONFIG.DURATION;
+
+                // 1. Local Earth Mechanics (Sidereal Spin + Invariant Celestial Orientation)
+                earthSpinGroup.rotation.y = timeSec * 3.8;
+                cloudMesh.rotation.y = timeSec * 4.1; // Differential cloud movement
+
+                const orbitAngle = timeSec * 0.75;
+                // Counter-rotate tilt group so Earth's rotational axis points steadily toward Polaris
+                earthTiltGroup.rotation.y = -orbitAngle;
+                earthOrbitGroup.position.set(
+                  Math.cos(orbitAngle) * CONFIG.EARTH_ORBIT_A,
+                  0,
+                  Math.sin(orbitAngle) * CONFIG.EARTH_ORBIT_A
+                );
+
+                // Update Atmosphere Sun Direction Uniform
+                const sunWorld = new THREE.Vector3();
+                sunMesh.getWorldPosition(sunWorld);
+                atmoMesh.material.uniforms.uSunPos.value.copy(sunWorld);
+
+                // 2. Planets Orbital Motions
+                planetObjects.forEach(p => {
+                  const angle = (timeSec / p.data.period) * Math.PI * 2;
+                  p.mesh.position.set(Math.cos(angle) * p.data.dist, 0, Math.sin(angle) * p.data.dist);
+                });
+
+                // 3. Solar System's Galactic Orbit around Sagittarius A*
+                const galacticAngle = timeSec * 0.042;
+                solarBarycenter.position.set(
+                  Math.cos(galacticAngle) * CONFIG.SUN_GALACTIC_DISTANCE,
+                  0,
+                  Math.sin(galacticAngle) * CONFIG.SUN_GALACTIC_DISTANCE
+                );
+                solarBarycenter.rotation.y = -galacticAngle;
+
+                // 4. Record Earth's Galactic Path (The Real Inclined Helix)
+                const earthWorld = new THREE.Vector3();
+                earthMesh.getWorldPosition(earthWorld);
+                trailPoints.push(earthWorld.clone());
+                if (trailPoints.length > MAX_TRAIL) trailPoints.shift();
+
+                const posAttr = trailLine.geometry.attributes.position;
+                for (let i = 0; i < trailPoints.length; i++) {
+                  posAttr.setXYZ(i, trailPoints[i].x, trailPoints[i].y, trailPoints[i].z);
+                }
+                trailLine.geometry.setDrawRange(0, trailPoints.length);
+                posAttr.needsUpdate = true;
+
+                // 5. Cinematic Camera Choreography & Film Script Synchronization
+                if (progress <= 0.18) {
+                  // ACT I: THE TERRESTRIAL FRAME (0s - 9s)
+                  const t = easeInOutCubic(progress / 0.18);
+                  camera.position.copy(earthWorld).add(new THREE.Vector3(
+                    Math.sin(t * 0.4) * 8.5,
+                    2.8 + t * 1.5,
+                    Math.cos(t * 0.4) * 9.5
+                  ));
+                  camera.lookAt(earthWorld);
+
+                  elAct.innerText = "ACT I — THE TERRESTRIAL FRAME";
+                  elTitle.innerText = "EARTH'S ROTATION";
+                  elFrame.innerText = "EARTH CRUST (SURFACE)";
+                  elSpeed.innerText = "1,674 KM/H";
+                  elSpeed.style.color = "#64d2ff";
+                  elScale.innerText = "PLANETOCENTRIC [1:10⁶]";
+                  elInvariant.innerText = "AXIAL OBLIQUITY: 23.439° FIXED";
+                  elVoice.innerText = '"Right now, sitting in your room, you feel completely motionless. But your reference frame is locked to a spinning sphere of rock..."';
+                  trailLine.material.opacity = 0.0;
+                }
+                else if (progress <= 0.40) {
+                  // ACT II: THE HELIOCENTRIC PIVOT (9s - 20s)
+                  const t = easeInOutCubic((progress - 0.18) / 0.22);
+                  const startCam = earthWorld.clone().add(new THREE.Vector3(8.5, 4.0, 9.5));
+                  const endCam = sunWorld.clone().add(new THREE.Vector3(0, 180, 260));
+
+                  camera.position.lerpVectors(startCam, endCam, t);
+                  camera.lookAt(sunWorld.clone().lerp(earthWorld, 1.0 - t * 0.7));
+
+                  elAct.innerText = "ACT II — THE HELIOCENTRIC PIVOT";
+                  elTitle.innerText = "ORBITING THE SUN";
+                  elFrame.innerText = "HELIOCENTRIC [SUN BARYCENTER]";
+                  elSpeed.innerText = "29.78 KM/S (~107,200 KM/H)";
+                  elSpeed.style.color = "#ffd60a";
+                  elScale.innerText = "HELIOCENTRIC [1 AU]";
+                  elInvariant.innerText = "ORBIT ECCENTRICITY: e = 0.0167";
+                  elVoice.innerText = '"Step outside Earth\'s frame into the Sun\'s gravity well, and that stillness vanishes. Earth is screaming through vacuum at nearly thirty kilometers every second."';
+                  trailLine.material.opacity = t * 0.4;
+                }
+                else if (progress <= 0.62) {
+                  // ACT III: THE PLANETARY DISC (20s - 31s)
+                  const t = easeInOutCubic((progress - 0.40) / 0.22);
+                  const startCam = sunWorld.clone().add(new THREE.Vector3(0, 180, 260));
+                  const endCam = sunWorld.clone().add(new THREE.Vector3(0, 650, 850));
+
+                  camera.position.lerpVectors(startCam, endCam, t);
+                  camera.lookAt(sunWorld);
+
+                  elAct.innerText = "ACT III — THE PLANETARY DISC";
+                  elTitle.innerText = "THE SOLAR SYSTEM";
+                  elFrame.innerText = "SOLAR SYSTEM BARYCENTER";
+                  elSpeed.innerText = "v ∝ 1 / √r (KEPLER'S LAW)";
+                  elSpeed.style.color = "#ff9f0a";
+                  elScale.innerText = "SYSTEM SCALE [50 AU]";
+                  elInvariant.innerText = "ECLIPTIC INCLINATION: 60.19° TO GALAXY";
+                  elVoice.innerText = '"Every planet in our solar system shares this plane. But the Sun is not an anchor fixed in the void. It carries this entire disc inside a far greater structure."';
+                  trailLine.material.opacity = 0.5;
+                }
+                else if (progress <= 0.84) {
+                  // ACT IV: THE GALACTIC APEX & MYTH DEBUNK (31s - 42s)
+                  const t = easeInOutCubic((progress - 0.62) / 0.22);
+                  const startCam = sunWorld.clone().add(new THREE.Vector3(0, 650, 850));
+                  const endCam = new THREE.Vector3(0, 9200, 14000);
+
+                  camera.position.lerpVectors(startCam, endCam, t);
+                  camera.lookAt(new THREE.Vector3(0, 0, 0));
+
+                  elAct.innerText = "ACT IV — THE GALACTIC APEX";
+                  elTitle.innerText = "THE MILKY WAY";
+                  elFrame.innerText = "GALACTIC REST FRAME (SGR A*)";
+                  elSpeed.innerText = "220 KM/S (~792,000 KM/H)";
+                  elSpeed.style.color = "#ff375f";
+                  elScale.innerText = "GALACTIC SCALE [~100,000 LIGHT-YEARS]";
+                  elInvariant.innerText = "GALACTIC PERIOD: ~230 MILLION YEARS";
+                  elVoice.innerText = '"The Sun hurtles around Sagittarius A at 220 kilometers per second—tilted 60 degrees to the galaxy. Earth doesn\'t trail behind like a comet; it weaves an inclined helix."';
+                  trailLine.material.opacity = 0.85;
+                }
+                else {
+                  // ACT V: INVARIANT REALITY (42s - 50s)
+                  const t = easeInOutCubic((progress - 0.84) / 0.16);
+                  const targetCam = sunWorld.clone().add(new THREE.Vector3(-420, 320, 580));
+                  camera.position.lerp(targetCam, 0.08);
+                  camera.lookAt(sunWorld);
+
+                  elAct.innerText = "ACT V — INVARIANT REALITY";
+                  elTitle.innerText = "RELATIVITY OF MOTION";
+                  elFrame.innerText = "ARBITRARY COORDINATE SELECTION";
+                  elSpeed.innerText = "dr_gal = dr_bary + dr_helio";
+                  elSpeed.style.color = "#30d158";
+                  elScale.innerText = "SYNTHESIS VIEW";
+                  elInvariant.innerText = "PRINCIPLE: NO PREFERRED REST FRAME";
+                  elVoice.innerText = '"Earth has no single true path through the cosmos. Closed circle or stretched helix—the geometry of your universe depends entirely on where you choose to stand."';
+                  trailLine.material.opacity = 0.9;
+                }
+
+                renderer.render(scene, camera);
+              };
+
+              console.log("[Director Engine] All visual assets and shaders ready.");
+            </script>
+          </body>
+          </html>
+          EOF
+
+      - name: Install Node Dependencies
+        run: npm install
+
+      - name: Execute Headless Render via Virtual Framebuffer
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          MESA_GL_VERSION_OVERRIDE: "4.5"
+          MESA_GLSL_VERSION_OVERRIDE: "450"
+          GALLIUM_DRIVER: "llvmpipe"
+        run: |
+          if [ "${{ github.event.inputs.preview_mode }}" = "true" ]; then
+            xvfb-run -s "-screen 0 1080x1920x24 -ac +extension GLX +render -noreset" npm run render:preview
+          else
+            xvfb-run -s "-screen 0 1080x1920x24 -ac +extension GLX +render -noreset" npm run render
+          fi
+
+      - name: Upload Cinematic Video Masterpiece
+        uses: actions/upload-artifact@v4
+        with:
+          name: space-motion-film-masterpiece
+          path: output/space_motion_masterpiece.mp4
+          retention-days: 14
