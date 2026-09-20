@@ -46,7 +46,8 @@ jobs:
       - name: Prepare Artifact Directory
         run: |
           mkdir -p export
-          find media/videos/ -type f -name "*.mp4" -exec cp {} export/ \;
+          # Exclude partial chunk files and copy only the stitched master video
+          find media/videos/ -type f -name "*.mp4" ! -path "*/partial_movie_files/*" -exec cp {} export/ \;
           ls -lh export/
 
       - name: Upload Video Artifact
