@@ -9,8 +9,6 @@ on:
 jobs:
   render:
     runs-on: ubuntu-latest
-    # Use the official Manim Docker image directly. 
-    # This skips all pip and apt-get installations entirely.
     container:
       image: manimcommunity/manim:latest
       options: --user root
@@ -19,13 +17,17 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Fix git ownership
+        run: git config --global --add safe.directory '*'
+
       - name: Render Video
-        # Runs instantly since all dependencies are already in the Docker image
+        # RIGHT HERE: superluminal_laser.py is passed to the manim command
         run: manim -qh --resolution 1080,1920 superluminal_laser.py SuperluminalLaser
 
       - name: Upload Video Artifact
         uses: actions/upload-artifact@v4
         with:
           name: superluminal-laser-video
-          path: media/videos/superluminal_laser/1080p60/SuperluminalLaser.mp4
+          # AND HERE: Manim creates a folder named 'superluminal_laser'
+          path: media/videos/superluminal_laser/**/*.mp4
           retention-days: 7
