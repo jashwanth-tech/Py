@@ -39,6 +39,6 @@ jobs:
       - name: Upload rendered MP4
         uses: actions/upload-artifact@v4
         with:
-          name: QuantumInterference-1080x1920
-          path: media/videos/quantum_interference/1080p60/QuantumInterferenceScene.mp4
+          name: QuantumInterference-Video
+          path: media/**/*.mp4
           if-no-files-found: error
