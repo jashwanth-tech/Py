@@ -1,4 +1,4 @@
-name: Render Quantum Interference Video
+name: Render Slope Explainer Video
 
 on:
   push:
@@ -32,13 +32,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install manim numpy
 
-      - name: Render scene
+      - name: Render scene (1080x1920 @ 60fps)
         run: |
-          manim -qh quantum_interference.py QuantumInterferenceScene
+          manim -qh what_slope_means.py WhatSlopeReallyMeans
 
       - name: Upload rendered MP4
         uses: actions/upload-artifact@v4
         with:
-          name: QuantumInterference-Video
+          name: WhatSlopeReallyMeans-Video
           path: media/**/*.mp4
           if-no-files-found: error
