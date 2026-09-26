@@ -25,7 +25,10 @@ jobs:
             ffmpeg \
             libcairo2-dev \
             libpango1.0-dev \
-            pkg-config
+            pkg-config \
+            texlive-latex-base \
+            texlive-latex-extra \
+            dvisvgm
 
       - name: Install Python packages
         run: |
